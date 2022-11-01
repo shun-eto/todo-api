@@ -1,3 +1,4 @@
+pub mod label;
 pub mod todo;
 
 use axum::{

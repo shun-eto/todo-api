@@ -6,8 +6,8 @@ use axum::{
     Router,
 };
 use dotenv::dotenv;
-use handlers::{all_todo, create_todo, delete_todo, find_todo, update_todo};
-use repositories::{TodoRepository, TodoRepositoryForDb};
+use handlers::todo::{all_todo, create_todo, delete_todo, find_todo, update_todo};
+use repositories::todo::{TodoRepository, TodoRepositoryForDb};
 use sqlx::PgPool;
 use std::{env, net::SocketAddr, sync::Arc};
 
@@ -56,7 +56,7 @@ async fn root() -> &'static str {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::repositories::{CreateTodo, Todo, TodoRepositoryForMemory};
+    use crate::repositories::todo::{CreateTodo, Todo, TodoRepositoryForMemory};
     use axum::{body::Body, http::Request, response::Response};
     use hyper::{header, Method, StatusCode};
     use tower::ServiceExt;

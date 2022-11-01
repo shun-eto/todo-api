@@ -8,25 +8,54 @@ use std::{
 };
 use validator::Validate;
 
-use super::RepositoryError;
+use super::{label::Label, RepositoryError};
 
 #[async_trait]
 pub trait TodoRepository: Clone + std::marker::Send + std::marker::Sync + 'static {
-    async fn create(&self, payload: CreateTodo) -> anyhow::Result<Todo>;
-    async fn find(&self, id: i32) -> anyhow::Result<Todo>;
-    async fn all(&self) -> anyhow::Result<Vec<Todo>>;
-    async fn update(&self, id: i32, payload: UpdateTodo) -> anyhow::Result<Todo>;
+    async fn create(&self, payload: CreateTodo) -> anyhow::Result<TodoEntity>;
+    async fn find(&self, id: i32) -> anyhow::Result<TodoEntity>;
+    async fn all(&self) -> anyhow::Result<Vec<TodoEntity>>;
+    async fn update(&self, id: i32, payload: UpdateTodo) -> anyhow::Result<TodoEntity>;
     async fn delete(&self, id: i32) -> anyhow::Result<()>;
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, FromRow)]
-pub struct Todo {
+pub struct TodoWithLabelFromRow {
     id: i32,
     text: String,
     completed: bool,
 }
 
-impl Todo {
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct TodoEntity {
+    pub id: i32,
+    pub text: String,
+    pub completed: bool,
+    pub labels: Vec<Label>,
+}
+
+fn fold_entities(rows: Vec<TodoWithLabelFromRow>) -> Vec<TodoEntity> {
+    rows.into_iter()
+        .fold(vec![], |mut accum: Vec<TodoEntity>, current| {
+            accum.push(TodoEntity {
+                id: current.id,
+                text: current.text.clone(),
+                completed: current.completed,
+                labels: vec![],
+            });
+
+            return accum;
+        })
+}
+
+fn fold_entity(row: TodoWithLabelFromRow) -> TodoEntity {
+    let todo_entities = fold_entities(vec![row]);
+    let todo = todo_entities.first().expect("expect 1 todo");
+
+    return todo.clone();
+}
+
+impl TodoWithLabelFromRow {
     pub fn new(id: i32, text: String) -> Self {
         Self {
             id,
@@ -55,74 +84,7 @@ pub struct UpdateTodo {
     completed: Option<bool>,
 }
 
-type TodoDatas = HashMap<i32, Todo>;
-
-#[derive(Debug, Clone)]
-pub struct TodoRepositoryForMemory {
-    store: Arc<RwLock<TodoDatas>>,
-}
-impl TodoRepositoryForMemory {
-    pub fn new() -> Self {
-        TodoRepositoryForMemory {
-            store: Arc::default(),
-        }
-    }
-
-    fn write_store_ref(&self) -> RwLockWriteGuard<TodoDatas> {
-        return self.store.write().unwrap();
-    }
-
-    fn read_store_ref(&self) -> RwLockReadGuard<TodoDatas> {
-        return self.store.read().unwrap();
-    }
-}
-
-#[async_trait]
-impl TodoRepository for TodoRepositoryForMemory {
-    async fn create(&self, payload: CreateTodo) -> anyhow::Result<Todo> {
-        let mut store = self.write_store_ref();
-        let id = (store.len() + 1) as i32;
-        let todo = Todo::new(id, payload.text.clone());
-        store.insert(id, todo.clone());
-        return Ok(todo);
-    }
-
-    async fn find(&self, id: i32) -> anyhow::Result<Todo> {
-        let store = self.read_store_ref();
-        let todo = store
-            .get(&id)
-            .map(|todo| todo.clone())
-            .ok_or(RepositoryError::NotFound(id))?;
-        return Ok(todo);
-    }
-
-    async fn all(&self) -> anyhow::Result<Vec<Todo>> {
-        let store = &self.read_store_ref();
-        let todos = Vec::from_iter(store.values().map(|todo| todo.clone()));
-        return Ok(todos);
-    }
-
-    async fn update(&self, id: i32, payload: UpdateTodo) -> anyhow::Result<Todo> {
-        let mut store = self.write_store_ref();
-        let todo = store.get(&id).context(RepositoryError::NotFound(id))?;
-        let text = payload.text.unwrap_or(todo.text.clone());
-        let completed = payload.completed.unwrap_or(todo.completed);
-        let todo = Todo {
-            id,
-            text,
-            completed,
-        };
-
-        store.insert(id, todo.clone());
-        return Ok(todo);
-    }
-
-    async fn delete(&self, id: i32) -> anyhow::Result<()> {
-        let mut store = self.write_store_ref();
-        store.remove(&id).ok_or(RepositoryError::NotFound(id))?;
-        return Ok(());
-    }
-}
+type TodoDatas = HashMap<i32, TodoWithLabelFromRow>;
 
 #[derive(Debug, Clone)]
 pub struct TodoRepositoryForDb {
@@ -137,8 +99,8 @@ impl TodoRepositoryForDb {
 
 #[async_trait]
 impl TodoRepository for TodoRepositoryForDb {
-    async fn create(&self, payload: CreateTodo) -> anyhow::Result<Todo> {
-        let todo = sqlx::query_as::<_, Todo>(
+    async fn create(&self, payload: CreateTodo) -> anyhow::Result<TodoEntity> {
+        let todo = sqlx::query_as::<_, TodoWithLabelFromRow>(
             r#"
                 insert into todos (text, completed)
                 values ($1, false)
@@ -149,11 +111,11 @@ impl TodoRepository for TodoRepositoryForDb {
         .fetch_one(&self.pool)
         .await?;
 
-        return Ok(todo);
+        return Ok(fold_entity(todo));
     }
 
-    async fn find(&self, id: i32) -> anyhow::Result<Todo> {
-        let todo = sqlx::query_as::<_, Todo>(
+    async fn find(&self, id: i32) -> anyhow::Result<TodoEntity> {
+        let todo = sqlx::query_as::<_, TodoWithLabelFromRow>(
             r#"
                 select * from todos where id=$1
             "#,
@@ -166,11 +128,11 @@ impl TodoRepository for TodoRepositoryForDb {
             _ => RepositoryError::UnexpectedError(e.to_string()),
         })?;
 
-        return Ok(todo);
+        return Ok(fold_entity(todo));
     }
 
-    async fn all(&self) -> anyhow::Result<Vec<Todo>> {
-        let todos = sqlx::query_as::<_, Todo>(
+    async fn all(&self) -> anyhow::Result<Vec<TodoEntity>> {
+        let todos = sqlx::query_as::<_, TodoWithLabelFromRow>(
             r#"
                 select * from todos
                 order by id desc;
@@ -179,12 +141,12 @@ impl TodoRepository for TodoRepositoryForDb {
         .fetch_all(&self.pool)
         .await?;
 
-        return Ok(todos);
+        return Ok(fold_entities(todos));
     }
 
-    async fn update(&self, id: i32, payload: UpdateTodo) -> anyhow::Result<Todo> {
+    async fn update(&self, id: i32, payload: UpdateTodo) -> anyhow::Result<TodoEntity> {
         let old_todo = self.find(id).await?;
-        let todo = sqlx::query_as::<_, Todo>(
+        let todo = sqlx::query_as::<_, TodoWithLabelFromRow>(
             r#"
                 update todos set text=$1, completed=$2
                 where id=$3
@@ -197,7 +159,7 @@ impl TodoRepository for TodoRepositoryForDb {
         .fetch_one(&self.pool)
         .await?;
 
-        return Ok(todo);
+        return Ok(fold_entity(todo));
     }
 
     async fn delete(&self, id: i32) -> anyhow::Result<()> {
@@ -226,54 +188,6 @@ mod test {
     use dotenv::dotenv;
 
     use super::*;
-
-    #[tokio::test]
-    async fn todo_crud_scenario() {
-        let text = "todo text".to_string();
-        let id = 1;
-        let expected = Todo::new(id, text.clone());
-
-        //  create
-        let repository = TodoRepositoryForMemory::new();
-        let todo = repository
-            .create(CreateTodo { text })
-            .await
-            .expect("failed create todo");
-        assert_eq!(expected, todo);
-
-        //  find
-        let todo = repository.find(todo.id).await.unwrap();
-        assert_eq!(expected, todo);
-
-        //  all
-        let todos = repository.all().await.expect("failed get all todo");
-        assert_eq!(vec![expected], todos);
-
-        //  update
-        let text = "update todo text".to_string();
-        let todo = repository
-            .update(
-                id,
-                UpdateTodo {
-                    text: Some(text.clone()),
-                    completed: Some(true),
-                },
-            )
-            .await
-            .expect("failed update todo.");
-        assert_eq!(
-            Todo {
-                id,
-                text,
-                completed: true
-            },
-            todo
-        );
-
-        //  delete
-        let res = repository.delete(id).await;
-        assert!(res.is_ok());
-    }
 
     #[tokio::test]
     async fn crud_scenario() {
